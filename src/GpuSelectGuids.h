@@ -1,0 +1,7 @@
+#pragma once
+
+#include <guiddef.h>
+
+// {8F7C3A91-5D2E-4B6C-A1F3-9E0D8C7B6A54}
+static const GUID CLSID_GpuSelectCommand =
+    { 0x8f7c3a91, 0x5d2e, 0x4b6c, { 0xa1, 0xf3, 0x9e, 0x0d, 0x8c, 0x7b, 0x6a, 0x54 } };
