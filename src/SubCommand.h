@@ -9,6 +9,7 @@
 enum class SubCommandType
 {
     Clear,        // 清除设置
+    Default,      // 默认
     PowerSaving,  // 节能
     HighPerf      // 高性能
 };

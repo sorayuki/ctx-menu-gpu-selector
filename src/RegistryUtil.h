@@ -1,5 +1,6 @@
 #pragma once
 
+#include <regex>
 #include <string>
 #include <Windows.h>
 
@@ -10,7 +11,8 @@ public:
     // GPU 偏好值
     enum GpuPreference
     {
-        GpuNotSet = 0,       // 未设置 / 已清除
+        GpuNotSet = -1,      // 注册表中不存在该 EXE 项
+        GpuDefault = 0,      // 默认
         GpuPowerSaving = 1,  // 节能
         GpuHighPerf = 2      // 高性能
     };
@@ -29,4 +31,5 @@ public:
 
 private:
     static const wchar_t* const kRegistryPath;
+    static const std::wregex kGpuPreferenceRegex;
 };

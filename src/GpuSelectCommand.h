@@ -5,7 +5,7 @@
 #include <shobjidl.h>
 #include <atlcom.h>
 
-/// 父菜单 "绑定显卡"，包含三个子命令
+/// 父菜单 "绑定显卡"，包含四个子命令
 class ATL_NO_VTABLE CGpuSelectCommand :
     public ATL::CComObjectRootEx<ATL::CComSingleThreadModel>,
     public ATL::CComCoClass<CGpuSelectCommand, &CLSID_GpuSelectCommand>,
@@ -32,7 +32,7 @@ public:
     STDMETHODIMP EnumSubCommands(IEnumExplorerCommand** ppEnum) override;
 };
 
-/// IEnumExplorerCommand 实现：枚举三个子命令
+/// IEnumExplorerCommand 实现：枚举四个子命令
 class ATL_NO_VTABLE CEnumSubCommands :
     public ATL::CComObjectRootEx<ATL::CComSingleThreadModel>,
     public IEnumExplorerCommand
@@ -41,8 +41,8 @@ public:
     CEnumSubCommands();
     ~CEnumSubCommands();
 
-    /// 初始化枚举器，传入三个子命令的 COM 指针
-    HRESULT Init(IExplorerCommand* pClear, IExplorerCommand* pPowerSave, IExplorerCommand* pHighPerf);
+    /// 初始化枚举器，传入四个子命令的 COM 指针
+    HRESULT Init(IExplorerCommand* pClear, IExplorerCommand* pDefault, IExplorerCommand* pPowerSave, IExplorerCommand* pHighPerf);
 
     BEGIN_COM_MAP(CEnumSubCommands)
         COM_INTERFACE_ENTRY(IEnumExplorerCommand)
@@ -55,6 +55,6 @@ public:
     STDMETHODIMP Clone(IEnumExplorerCommand** ppEnum) override;
 
 private:
-    ATL::CComPtr<IExplorerCommand> m_commands[3];
+    ATL::CComPtr<IExplorerCommand> m_commands[4];
     ULONG m_index;
 };

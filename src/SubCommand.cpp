@@ -66,6 +66,8 @@ namespace
         {
         case SubCommandType::Clear:
             return hasPreferenceEntry && preference == RegistryUtil::GpuNotSet;
+        case SubCommandType::Default:
+            return preference == RegistryUtil::GpuDefault;
         case SubCommandType::PowerSaving:
             return preference == RegistryUtil::GpuPowerSaving;
         case SubCommandType::HighPerf:
@@ -130,20 +132,24 @@ STDMETHODIMP CSubCommand::GetTitle(IShellItemArray* psiItemArray, LPWSTR* ppszNa
     switch (m_type)
     {
     case SubCommandType::Clear:       title = L"清除设置(&C)";  break;
+    case SubCommandType::Default:     title = L"默认(&D)";      break;
     case SubCommandType::PowerSaving: title = L"节能(&S)";      break;
     case SubCommandType::HighPerf:    title = L"高性能(&H)";    break;
     }
 
     RegistryUtil::GpuPreference selectionPreference = RegistryUtil::GpuNotSet;
     bool hasPreferenceEntry = false;
-    if (GetSelectionPreference(psiItemArray, selectionPreference, hasPreferenceEntry) &&
-        IsCommandSelected(m_type, selectionPreference, hasPreferenceEntry))
+    if (!GetSelectionPreference(psiItemArray, selectionPreference, hasPreferenceEntry) || !hasPreferenceEntry)
+        return SHStrDup(title, ppszName);
+
+    if (IsCommandSelected(m_type, selectionPreference, hasPreferenceEntry))
     {
-        std::wstring markedTitle = std::wstring(L"已选: ") + title;
+        std::wstring markedTitle = std::wstring(L"〇 ") + title;
         return SHStrDup(markedTitle.c_str(), ppszName);
     }
 
-    return SHStrDup(title, ppszName);
+    std::wstring unmarkedTitle = std::wstring(L"　 ") + title;
+    return SHStrDup(unmarkedTitle.c_str(), ppszName);
 }
 
 STDMETHODIMP CSubCommand::GetIcon(IShellItemArray*, LPWSTR* ppszIcon)
@@ -218,6 +224,9 @@ STDMETHODIMP CSubCommand::Invoke(IShellItemArray* psiItemArray, IBindCtx* /*pbc*
         {
         case SubCommandType::Clear:
             RegistryUtil::RemovePreference(filePath);
+            break;
+        case SubCommandType::Default:
+            RegistryUtil::SetPreference(filePath, RegistryUtil::GpuDefault);
             break;
         case SubCommandType::PowerSaving:
             RegistryUtil::SetPreference(filePath, RegistryUtil::GpuPowerSaving);

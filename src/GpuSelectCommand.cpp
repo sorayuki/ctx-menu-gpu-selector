@@ -58,10 +58,12 @@ STDMETHODIMP CGpuSelectCommand::EnumSubCommands(IEnumExplorerCommand** ppEnum)
         return E_POINTER;
     *ppEnum = nullptr;
 
-    // 创建三个子命令
-    ATL::CComPtr<IExplorerCommand> spClear, spPowerSave, spHighPerf;
+    // 创建四个子命令
+    ATL::CComPtr<IExplorerCommand> spClear, spDefault, spPowerSave, spHighPerf;
 
     HRESULT hr = CSubCommand::Create(SubCommandType::Clear, &spClear);
+    if (FAILED(hr)) return hr;
+    hr = CSubCommand::Create(SubCommandType::Default, &spDefault);
     if (FAILED(hr)) return hr;
     hr = CSubCommand::Create(SubCommandType::PowerSaving, &spPowerSave);
     if (FAILED(hr)) return hr;
@@ -73,7 +75,7 @@ STDMETHODIMP CGpuSelectCommand::EnumSubCommands(IEnumExplorerCommand** ppEnum)
     hr = ATL::CComObject<CEnumSubCommands>::CreateInstance(&pEnum);
     if (FAILED(hr)) return hr;
 
-    hr = pEnum->Init(spClear, spPowerSave, spHighPerf);
+    hr = pEnum->Init(spClear, spDefault, spPowerSave, spHighPerf);
     if (FAILED(hr))
     {
         delete pEnum;
@@ -93,11 +95,12 @@ CEnumSubCommands::~CEnumSubCommands()
 {
 }
 
-HRESULT CEnumSubCommands::Init(IExplorerCommand* pClear, IExplorerCommand* pPowerSave, IExplorerCommand* pHighPerf)
+HRESULT CEnumSubCommands::Init(IExplorerCommand* pClear, IExplorerCommand* pDefault, IExplorerCommand* pPowerSave, IExplorerCommand* pHighPerf)
 {
     m_commands[0] = pClear;
-    m_commands[1] = pPowerSave;
-    m_commands[2] = pHighPerf;
+    m_commands[1] = pDefault;
+    m_commands[2] = pPowerSave;
+    m_commands[3] = pHighPerf;
     m_index = 0;
     return S_OK;
 }
@@ -108,7 +111,7 @@ STDMETHODIMP CEnumSubCommands::Next(ULONG celt, IExplorerCommand** ppIExplorerCo
         return E_POINTER;
 
     ULONG fetched = 0;
-    while (fetched < celt && m_index < 3)
+    while (fetched < celt && m_index < 4)
     {
         HRESULT hr = m_commands[m_index].CopyTo(&ppIExplorerCommand[fetched]);
         if (FAILED(hr))
@@ -126,9 +129,9 @@ STDMETHODIMP CEnumSubCommands::Next(ULONG celt, IExplorerCommand** ppIExplorerCo
 STDMETHODIMP CEnumSubCommands::Skip(ULONG celt)
 {
     m_index += celt;
-    if (m_index > 3)
-        m_index = 3;
-    return (m_index <= 3) ? S_OK : S_FALSE;
+    if (m_index > 4)
+        m_index = 4;
+    return (m_index <= 4) ? S_OK : S_FALSE;
 }
 
 STDMETHODIMP CEnumSubCommands::Reset()
@@ -147,7 +150,7 @@ STDMETHODIMP CEnumSubCommands::Clone(IEnumExplorerCommand** ppEnum)
     HRESULT hr = ATL::CComObject<CEnumSubCommands>::CreateInstance(&pClone);
     if (FAILED(hr)) return hr;
 
-    hr = pClone->Init(m_commands[0], m_commands[1], m_commands[2]);
+    hr = pClone->Init(m_commands[0], m_commands[1], m_commands[2], m_commands[3]);
     if (FAILED(hr))
     {
         delete pClone;

@@ -4,6 +4,10 @@
 const wchar_t* const RegistryUtil::kRegistryPath =
     L"Software\\Microsoft\\DirectX\\UserGpuPreferences";
 
+const std::wregex RegistryUtil::kGpuPreferenceRegex(
+    L"GpuPreference\\s*=\\s*([0-9]+)\\s*;",
+    std::regex_constants::icase);
+
 bool RegistryUtil::TryGetPreference(const std::wstring& exePath, GpuPreference& pref)
 {
     pref = GpuNotSet;
@@ -19,17 +23,19 @@ bool RegistryUtil::TryGetPreference(const std::wstring& exePath, GpuPreference& 
     if (lr != ERROR_SUCCESS)
         return false;
 
-    std::wstring value(buffer);
-    size_t pos = value.find(L"GpuPreference=");
-    if (pos == std::wstring::npos)
+    std::wcmatch match = {};
+    if (!std::regex_search(buffer, match, kGpuPreferenceRegex) || match.size() < 2)
         return true;
 
-    pos += 14;
-    int num = _wtoi(value.c_str() + pos);
-    if (num == 1)
+    int num = _wtoi(match[1].str().c_str());
+    if (num == 0)
+        pref = GpuDefault;
+    else if (num == 1)
         pref = GpuPowerSaving;
     else if (num == 2)
         pref = GpuHighPerf;
+    else
+        pref = GpuDefault;
 
     return true;
 }
@@ -43,7 +49,7 @@ RegistryUtil::GpuPreference RegistryUtil::GetPreference(const std::wstring& exeP
 
 bool RegistryUtil::SetPreference(const std::wstring& exePath, GpuPreference pref)
 {
-    if (pref != GpuPowerSaving && pref != GpuHighPerf)
+    if (pref != GpuDefault && pref != GpuPowerSaving && pref != GpuHighPerf)
         return false;
 
     // 确保注册表项存在
@@ -52,10 +58,24 @@ bool RegistryUtil::SetPreference(const std::wstring& exePath, GpuPreference pref
     if (lr != ERROR_SUCCESS)
         return false;
 
-    wchar_t value[64];
-    swprintf_s(value, L"GpuPreference=%d;", static_cast<int>(pref));
+    wchar_t buffer[256] = {};
+    ULONG chars = _countof(buffer);
+    lr = key.QueryStringValue(exePath.c_str(), buffer, &chars);
 
-    lr = key.SetStringValue(exePath.c_str(), value);
+    std::wstring currentValue;
+    if (lr == ERROR_SUCCESS)
+        currentValue = buffer;
+
+    const std::wstring replacement = L"GpuPreference=" + std::to_wstring(static_cast<int>(pref)) + L";";
+    std::wstring updatedValue = std::regex_replace(currentValue, kGpuPreferenceRegex, replacement);
+    if (updatedValue == currentValue)
+    {
+        if (!updatedValue.empty() && updatedValue.back() != L';')
+            updatedValue += L';';
+        updatedValue += replacement;
+    }
+
+    lr = key.SetStringValue(exePath.c_str(), updatedValue.c_str());
     return (lr == ERROR_SUCCESS);
 }
 
