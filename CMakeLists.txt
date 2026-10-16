@@ -19,29 +19,48 @@ endif()
 # 关闭 ATL 所有权警告
 add_compile_options(/W3 /wd4467)
 
-# ── 源文件 ────────────────────────────────────────────────
+# ── 共享核心库（注册表读写逻辑，供 Shell 扩展与 UI 复用）──────
+add_library(GpuSelectCore STATIC
+    src/RegistryUtil.cpp
+)
+target_include_directories(GpuSelectCore PUBLIC src)
+target_link_libraries(GpuSelectCore PUBLIC advapi32)
+
+# ── Shell 扩展 DLL ────────────────────────────────────────
 add_library(GpuSelect SHARED
     src/dllmain.cpp
     src/GpuSelectCommand.cpp
     src/SubCommand.cpp
-    src/RegistryUtil.cpp
     src/GpuSelect.def
 )
 
 target_include_directories(GpuSelect PRIVATE src)
 
-# ── 链接 ──────────────────────────────────────────────────
 # Shell API（IShellItemArray 等）
 target_link_libraries(GpuSelect PRIVATE
+    GpuSelectCore
     shell32
     shlwapi
     ole32
-    advapi32
     user32
 )
 
+# ── 图形界面程序（prd2：ListView + 刷新按钮 + 亲和性菜单）────
+add_executable(GpuSelectUI WIN32
+    src/ui/GpuSelectUI.cpp
+)
+
+target_include_directories(GpuSelectUI PRIVATE src)
+target_link_libraries(GpuSelectUI PRIVATE
+    GpuSelectCore
+    comctl32
+    user32
+    gdi32
+    shlwapi
+)
+
 # ── 安装（可选） ──────────────────────────────────────────
-install(TARGETS GpuSelect
+install(TARGETS GpuSelectCore GpuSelect GpuSelectUI
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib

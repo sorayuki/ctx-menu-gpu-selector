@@ -1,0 +1,502 @@
+// GPU 亲和性管理窗口程序（prd2）
+// 列出注册表中所有已配置 GPU 亲和性的程序，支持多选、右键调整亲和性、刷新按钮。
+// 注册表的读取与操作逻辑复用 RegistryUtil（与 Shell 扩展共享同一份实现）。
+
+#include <windows.h>
+#include <windowsx.h>
+#include <commctrl.h>
+#include <shlwapi.h>
+#include <algorithm>
+#include <cwchar>
+#include <string>
+#include <vector>
+#include <set>
+
+#include "RegistryUtil.h"
+
+// 启用 ComCtl32 v6 视觉样式（主题化的 ListView / Button）
+#pragma comment(linker, "\"/manifestdependency:type='win32' \
+name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
+processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+
+namespace
+{
+    const wchar_t* const kWindowClass = L"GpuSelectUI.MainWindow";
+    const wchar_t* const kWindowTitle = L"GPU 亲和性管理";
+
+    // 控件 ID
+    const int IDC_REFRESH_BTN = 1000;
+    const int IDC_LISTVIEW    = 1001;
+    const int IDC_CLEAN_BTN   = 1002;
+
+    // 右键菜单命令 ID（DEFAULT..HIGHPERF 必须连续，供 CheckMenuRadioItem 使用）
+    const int IDM_CTX_CLEAR      = 2000;
+    const int IDM_CTX_DEFAULT    = 2001;
+    const int IDM_CTX_POWERSAVE  = 2002;
+    const int IDM_CTX_HIGHPERF   = 2003;
+
+    // 列索引
+    const int COL_PATH = 0;
+    const int COL_PREF = 1;
+
+    // 布局常量
+    const int kMargin   = 8;
+    const int kButtonW  = 88;
+    const int kButtonH  = 28;
+    const int kCleanBtnW = 110;
+    const int kButtonGap = 8;
+    const int kPrefColW = 150;
+
+    struct UIState
+    {
+        HWND hMain    = nullptr;
+        HWND hList    = nullptr;
+        HWND hRefresh = nullptr;
+        HWND hClean   = nullptr;
+        HFONT hFont   = nullptr;
+        std::vector<RegistryUtil::GpuEntry> entries;
+        std::set<int> redItems;   // 需标红的行索引（清理确认期间）
+    };
+
+    void RefreshList(UIState* state);
+
+    // 计算所有选中项共同的亲和性；unified 为 true 表示选中项亲和性一致
+    bool GetSelectionCommonPreference(UIState* state,
+                                      RegistryUtil::GpuPreference& common,
+                                      bool& unified)
+    {
+        common = RegistryUtil::GpuNotSet;
+        unified = false;
+
+        bool any = false;
+        bool first = true;
+        RegistryUtil::GpuPreference cur = RegistryUtil::GpuNotSet;
+
+        int index = -1;
+        while ((index = ListView_GetNextItem(state->hList, index, LVNI_SELECTED)) != -1)
+        {
+            if (index < 0 || static_cast<size_t>(index) >= state->entries.size())
+                continue;
+
+            any = true;
+            RegistryUtil::GpuPreference p = state->entries[index].preference;
+            if (first)
+            {
+                cur = p;
+                first = false;
+            }
+            else if (p != cur)
+            {
+                common = cur;
+                unified = false;
+                return true;
+            }
+        }
+
+        if (!any)
+            return false;
+
+        common = cur;
+        unified = true;
+        return true;
+    }
+
+    // 对当前所有选中项应用命令，然后刷新列表
+    void ApplyContextCommand(UIState* state, int commandId)
+    {
+        bool isRemove = (commandId == IDM_CTX_CLEAR);
+        RegistryUtil::GpuPreference setTo = RegistryUtil::GpuNotSet;
+
+        switch (commandId)
+        {
+        case IDM_CTX_CLEAR:      break;
+        case IDM_CTX_DEFAULT:    setTo = RegistryUtil::GpuDefault;     break;
+        case IDM_CTX_POWERSAVE:  setTo = RegistryUtil::GpuPowerSaving; break;
+        case IDM_CTX_HIGHPERF:   setTo = RegistryUtil::GpuHighPerf;    break;
+        default:                 return;
+        }
+
+        int index = -1;
+        while ((index = ListView_GetNextItem(state->hList, index, LVNI_SELECTED)) != -1)
+        {
+            if (index < 0 || static_cast<size_t>(index) >= state->entries.size())
+                continue;
+
+            const std::wstring& path = state->entries[index].exePath;
+            if (isRemove)
+                RegistryUtil::RemovePreference(path);
+            else
+                RegistryUtil::SetPreference(path, setTo);
+        }
+
+        // 用户执行清除（或调整）后刷新列表
+        RefreshList(state);
+    }
+
+    // 处理 ListView 右键：修正选择集后弹出亲和性菜单
+    void HandleListRightClick(UIState* state)
+    {
+        POINT ptScreen = {};
+        GetCursorPos(&ptScreen);
+
+        // 命中测试：若右键点击的项不在当前选择集内，则改为单选该项；
+        // 若已属于多选集合，则保留整个选择集（资源管理器习惯）。
+        POINT ptClient = ptScreen;
+        ScreenToClient(state->hList, &ptClient);
+
+        LVHITTESTINFO hit = {};
+        hit.pt = ptClient;
+        int hitIndex = ListView_HitTest(state->hList, &hit);
+
+        if (hitIndex >= 0)
+        {
+            UINT selState = static_cast<UINT>(
+                ListView_GetItemState(state->hList, hitIndex, LVIS_SELECTED));
+            if ((selState & LVIS_SELECTED) == 0)
+            {
+                ListView_SetItemState(state->hList, -1, 0, LVIS_SELECTED);
+                ListView_SetItemState(state->hList, hitIndex, LVIS_SELECTED, LVIS_SELECTED);
+            }
+        }
+        else
+        {
+            ListView_SetItemState(state->hList, -1, 0, LVIS_SELECTED);
+        }
+
+        int selectedCount = static_cast<int>(
+            SendMessageW(state->hList, LVM_GETSELECTEDCOUNT, 0, 0));
+        if (selectedCount <= 0)
+            return;
+
+        HMENU menu = CreatePopupMenu();
+        if (!menu)
+            return;
+
+        AppendMenuW(menu, MF_STRING, IDM_CTX_CLEAR, L"清除设置");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, IDM_CTX_DEFAULT, L"默认");
+        AppendMenuW(menu, MF_STRING, IDM_CTX_POWERSAVE, L"节能");
+        AppendMenuW(menu, MF_STRING, IDM_CTX_HIGHPERF, L"高性能");
+
+        RegistryUtil::GpuPreference common = RegistryUtil::GpuNotSet;
+        bool unified = false;
+        if (GetSelectionCommonPreference(state, common, unified) && unified)
+        {
+            int radioId = 0;
+            switch (common)
+            {
+            case RegistryUtil::GpuDefault:     radioId = IDM_CTX_DEFAULT;   break;
+            case RegistryUtil::GpuPowerSaving: radioId = IDM_CTX_POWERSAVE; break;
+            case RegistryUtil::GpuHighPerf:    radioId = IDM_CTX_HIGHPERF;  break;
+            default: break;
+            }
+            if (radioId != 0)
+            {
+                CheckMenuRadioItem(menu, IDM_CTX_DEFAULT, IDM_CTX_HIGHPERF,
+                                   radioId, MF_BYCOMMAND);
+            }
+        }
+
+        int commandId = static_cast<int>(TrackPopupMenu(
+            menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            ptScreen.x, ptScreen.y, 0, state->hMain, nullptr));
+
+        DestroyMenu(menu);
+
+        if (commandId != 0)
+            ApplyContextCommand(state, commandId);
+    }
+
+    // 依据客户区尺寸布局：ListView 跟随上下左右，刷新按钮固定左上角
+    void LayoutControls(UIState* state, int clientW, int clientH)
+    {
+        MoveWindow(state->hRefresh, kMargin, kMargin, kButtonW, kButtonH, TRUE);
+        MoveWindow(state->hClean, kMargin + kButtonW + kButtonGap, kMargin,
+                   kCleanBtnW, kButtonH, TRUE);
+
+        int listTop   = kMargin * 2 + kButtonH;
+        int listWidth = clientW - kMargin * 2;
+        int listHeight = clientH - listTop - kMargin;
+        if (listWidth < 0)  listWidth = 0;
+        if (listHeight < 0) listHeight = 0;
+
+        MoveWindow(state->hList, kMargin, listTop, listWidth, listHeight, TRUE);
+
+        // 让“程序路径”列填满可用宽度，“亲和性”列固定宽度
+        int gutter = GetSystemMetrics(SM_CXVSCROLL) + 4;
+        int pathWidth = listWidth - gutter - kPrefColW;
+        if (pathWidth < 60) pathWidth = 60;
+
+        ListView_SetColumnWidth(state->hList, COL_PATH, pathWidth);
+        ListView_SetColumnWidth(state->hList, COL_PREF, kPrefColW);
+    }
+
+    void RefreshList(UIState* state)
+    {
+        state->redItems.clear();
+        state->entries = RegistryUtil::EnumerateAll();
+        std::sort(state->entries.begin(), state->entries.end(),
+                  [](const RegistryUtil::GpuEntry& a, const RegistryUtil::GpuEntry& b)
+                  {
+                      return _wcsicmp(a.exePath.c_str(), b.exePath.c_str()) < 0;
+                  });
+
+        ListView_DeleteAllItems(state->hList);
+
+        for (int i = 0; i < static_cast<int>(state->entries.size()); ++i)
+        {
+            LVITEMW item = {};
+            item.mask    = LVIF_TEXT;
+            item.iItem   = i;
+            item.iSubItem = COL_PATH;
+            item.pszText = const_cast<LPWSTR>(state->entries[i].exePath.c_str());
+            SendMessageW(state->hList, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&item));
+
+            const wchar_t* label = RegistryUtil::PreferenceLabel(state->entries[i].preference);
+            ListView_SetItemText(state->hList, i, COL_PREF, const_cast<LPWSTR>(label));
+        }
+    }
+
+    // 判断是否为文件系统路径（含反斜杠）。UWP 等以 AppUserModelID 形式存在的键
+    // （如 "OpenAI.Codex_xxx!App"）不是文件路径，无法用文件存在性判断，故跳过。
+    bool IsFileSystemPath(const std::wstring& path)
+    {
+        return path.find(L'\\') != std::wstring::npos;
+    }
+
+    // 清理：先把"文件已不存在"的项在列表中标红，确认后再删除；取消则恢复原颜色
+    void CleanInvalidEntries(UIState* state)
+    {
+        // 依据当前列表计算无效项索引（列表与 state->entries 始终同步）
+        state->redItems.clear();
+        for (int i = 0; i < static_cast<int>(state->entries.size()); ++i)
+        {
+            const std::wstring& path = state->entries[i].exePath;
+            if (!IsFileSystemPath(path))
+                continue; // 非文件路径键（如 UWP）不处理
+            if (!::PathFileExistsW(path.c_str()))
+                state->redItems.insert(i);
+        }
+
+        if (state->redItems.empty())
+        {
+            MessageBoxW(state->hMain, L"未发现文件已不存在的无效项。",
+                        kWindowTitle, MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+
+        // 确认前先标红并重绘，让用户看清将要删除的是哪些项
+        InvalidateRect(state->hList, nullptr, TRUE);
+        UpdateWindow(state->hList);
+
+        std::wstring prompt = L"发现 " + std::to_wstring(state->redItems.size()) +
+            L" 个文件已不存在的无效项（已在列表中标红）。\n\n确定要删除标红的项吗？";
+        int answer = MessageBoxW(state->hMain, prompt.c_str(),
+                                 L"清理无效项", MB_YESNO | MB_ICONQUESTION);
+
+        if (answer != IDYES)
+        {
+            // 用户取消：恢复原有颜色
+            state->redItems.clear();
+            InvalidateRect(state->hList, nullptr, TRUE);
+            return;
+        }
+
+        std::vector<std::wstring> toDelete;
+        toDelete.reserve(state->redItems.size());
+        for (int i : state->redItems)
+            toDelete.push_back(state->entries[i].exePath);
+
+        int removed = 0;
+        for (const auto& path : toDelete)
+        {
+            if (RegistryUtil::RemovePreference(path))
+                ++removed;
+        }
+
+        std::wstring result = L"已清理 " + std::to_wstring(removed) + L" 个无效项。";
+        MessageBoxW(state->hMain, result.c_str(), kWindowTitle, MB_OK | MB_ICONINFORMATION);
+
+        RefreshList(state);
+    }
+
+    // ListView 自绘：将 redItems 中的行文字标红
+    LRESULT OnListCustomDraw(UIState* state, LPNMLVCUSTOMDRAW cd)
+    {
+        switch (cd->nmcd.dwDrawStage)
+        {
+        case CDDS_PREPAINT:
+            return CDRF_NOTIFYITEMDRAW;
+        case CDDS_ITEMPREPAINT:
+            return CDRF_NOTIFYSUBITEMDRAW;
+        case (CDDS_ITEMPREPAINT | CDDS_SUBITEM):
+            if (state->redItems.find(static_cast<int>(cd->nmcd.dwItemSpec)) != state->redItems.end())
+                cd->clrText = RGB(192, 0, 0);
+            return CDRF_DODEFAULT;
+        }
+        return CDRF_DODEFAULT;
+    }
+
+    LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        UIState* state = reinterpret_cast<UIState*>(GetWindowLongPtrW(hWnd, GWLP_USERDATA));
+
+        switch (msg)
+        {
+        case WM_CREATE:
+        {
+            auto* s = new (std::nothrow) UIState();
+            if (!s)
+                return -1;
+
+            s->hMain = hWnd;
+            s->hFont = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+            SetWindowLongPtrW(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(s));
+            state = s;
+
+            HINSTANCE hInst = reinterpret_cast<LPCREATESTRUCT>(lParam)->hInstance;
+
+            // 刷新按钮（固定左上角）
+            s->hRefresh = CreateWindowExW(
+                0, L"BUTTON", L"刷新",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_REFRESH_BTN)),
+                hInst, nullptr);
+
+            // 清理无效项按钮（位于刷新按钮右侧，同样固定不随窗口缩放）
+            s->hClean = CreateWindowExW(
+                0, L"BUTTON", L"清理无效项",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_CLEAN_BTN)),
+                hInst, nullptr);
+
+            // ListView：不带 LVS_SINGLE_SEL 以支持多选
+            s->hList = CreateWindowExW(
+                WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+                WS_CHILD | WS_VISIBLE | LVS_REPORT,
+                0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_LISTVIEW)),
+                hInst, nullptr);
+
+            SendMessageW(s->hRefresh, WM_SETFONT, reinterpret_cast<WPARAM>(s->hFont), TRUE);
+            SendMessageW(s->hClean, WM_SETFONT, reinterpret_cast<WPARAM>(s->hFont), TRUE);
+            SendMessageW(s->hList, WM_SETFONT, reinterpret_cast<WPARAM>(s->hFont), TRUE);
+
+            ListView_SetExtendedListViewStyle(s->hList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+
+            LVCOLUMNW col = {};
+            col.mask  = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
+            col.fmt   = LVCFMT_LEFT;
+
+            col.pszText = const_cast<LPWSTR>(static_cast<LPCWSTR>(L"程序路径"));
+            col.cx      = 600;
+            SendMessageW(s->hList, LVM_INSERTCOLUMNW, COL_PATH, reinterpret_cast<LPARAM>(&col));
+
+            col.pszText = const_cast<LPWSTR>(static_cast<LPCWSTR>(L"GPU 亲和性"));
+            col.cx      = kPrefColW;
+            SendMessageW(s->hList, LVM_INSERTCOLUMNW, COL_PREF, reinterpret_cast<LPARAM>(&col));
+
+            RefreshList(s);
+            return 0;
+        }
+
+        case WM_SIZE:
+            if (state)
+                LayoutControls(state, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            return 0;
+
+        case WM_GETMINMAXINFO:
+        {
+            // 设置最小尺寸，避免控件被压缩为负值
+            LPMINMAXINFO mmi = reinterpret_cast<LPMINMAXINFO>(lParam);
+            mmi->ptMinTrackSize.x = 320;
+            mmi->ptMinTrackSize.y = 200;
+            return 0;
+        }
+
+        case WM_COMMAND:
+            if (state && HIWORD(wParam) == BN_CLICKED)
+            {
+                switch (LOWORD(wParam))
+                {
+                case IDC_REFRESH_BTN:
+                    RefreshList(state);
+                    return 0;
+                case IDC_CLEAN_BTN:
+                    CleanInvalidEntries(state);
+                    return 0;
+                }
+            }
+            break;
+
+        case WM_NOTIFY:
+        {
+            LPNMHDR hdr = reinterpret_cast<LPNMHDR>(lParam);
+            if (state && hdr && hdr->hwndFrom == state->hList)
+            {
+                if (hdr->code == NM_RCLICK)
+                {
+                    HandleListRightClick(state);
+                    return 0;
+                }
+                if (hdr->code == NM_CUSTOMDRAW)
+                {
+                    return OnListCustomDraw(state, reinterpret_cast<LPNMLVCUSTOMDRAW>(lParam));
+                }
+            }
+            break;
+        }
+
+        case WM_DESTROY:
+            if (state)
+            {
+                SetWindowLongPtrW(hWnd, GWLP_USERDATA, 0);
+                delete state;
+            }
+            PostQuitMessage(0);
+            return 0;
+        }
+
+        return DefWindowProcW(hWnd, msg, wParam, lParam);
+    }
+}
+
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
+{
+    SetProcessDPIAware();
+
+    INITCOMMONCONTROLSEX icc = {};
+    icc.dwSize = sizeof(icc);
+    icc.dwICC  = ICC_STANDARD_CLASSES;
+    InitCommonControlsEx(&icc);
+
+    WNDCLASSEXW wc = {};
+    wc.cbSize        = sizeof(wc);
+    wc.lpfnWndProc   = WndProc;
+    wc.hInstance     = hInstance;
+    wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.lpszClassName = kWindowClass;
+    wc.hIcon         = LoadIconW(nullptr, IDI_APPLICATION);
+
+    if (!RegisterClassExW(&wc))
+        return 0;
+
+    HWND hWnd = CreateWindowExW(
+        0, kWindowClass, kWindowTitle, WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, 900, 560,
+        nullptr, nullptr, hInstance, nullptr);
+    if (!hWnd)
+        return 0;
+
+    ShowWindow(hWnd, nCmdShow);
+    UpdateWindow(hWnd);
+
+    MSG msg = {};
+    while (GetMessageW(&msg, nullptr, 0, 0))
+    {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    return static_cast<int>(msg.wParam);
+}

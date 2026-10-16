@@ -2,6 +2,7 @@
 
 #include <regex>
 #include <string>
+#include <vector>
 #include <Windows.h>
 
 /// 使用 ATL::CRegKey 封装 GPU 偏好设置的注册表操作
@@ -16,6 +17,19 @@ public:
         GpuPowerSaving = 1,  // 节能
         GpuHighPerf = 2      // 高性能
     };
+
+    /// 注册表中的一个 GPU 亲和性配置条目
+    struct GpuEntry
+    {
+        std::wstring exePath;
+        GpuPreference preference;
+    };
+
+    /// 枚举注册表中所有已配置 GPU 亲和性的程序条目
+    static std::vector<GpuEntry> EnumerateAll();
+
+    /// 偏好值对应的中文标签
+    static const wchar_t* PreferenceLabel(GpuPreference pref);
 
     /// 尝试读取指定 EXE 的 GPU 偏好。返回 false 表示注册表中不存在该 EXE 项。
     static bool TryGetPreference(const std::wstring& exePath, GpuPreference& pref);
