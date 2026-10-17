@@ -45,7 +45,7 @@ target_link_libraries(GpuSelect PRIVATE
     user32
 )
 
-# ── 图形界面程序（prd2：ListView + 刷新按钮 + 亲和性菜单）────
+# ── 图形界面程序（prd2：菜单栏 + ListView + 亲和性菜单）────
 add_executable(GpuSelectUI WIN32
     src/ui/GpuSelectUI.cpp
 )

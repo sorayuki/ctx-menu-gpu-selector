@@ -1,5 +1,6 @@
 // GPU 亲和性管理窗口程序（prd2）
-// 列出注册表中所有已配置 GPU 亲和性的程序，支持多选、右键调整亲和性、刷新按钮。
+// 列出注册表中所有已配置 GPU 亲和性的程序，支持多选、右键调整亲和性。
+// 菜单栏第一级提供“刷新”、“清理”、“系统设置”；“右键”下拉提供安装/卸载资源管理器右键菜单。
 // 注册表的读取与操作逻辑复用 RegistryUtil（与 Shell 扩展共享同一份实现）。
 
 #include <windows.h>
@@ -26,10 +27,14 @@ namespace
     const wchar_t* const kWindowTitle = L"GPU 亲和性管理";
 
     // 控件 ID
-    const int IDC_REFRESH_BTN = 1000;
-    const int IDC_LISTVIEW    = 1001;
-    const int IDC_CLEAN_BTN   = 1002;
-    const int IDC_SETTINGS_BTN = 1003;
+    const int IDC_LISTVIEW = 1001;
+
+    // 菜单栏命令 ID
+    const int IDM_REFRESH   = 1010;
+    const int IDM_CLEAN     = 1011;
+    const int IDM_SETTINGS  = 1012;
+    const int IDM_INSTALL   = 1013;
+    const int IDM_UNINSTALL = 1014;
 
     // ListView 子类化 ID（用于接收拖放）
     const UINT_PTR kListSubclassId = 1;
@@ -46,11 +51,6 @@ namespace
 
     // 布局常量
     const int kMargin   = 8;
-    const int kButtonW  = 88;
-    const int kButtonH  = 28;
-    const int kCleanBtnW = 110;
-    const int kSettingsBtnW = 88;
-    const int kButtonGap = 8;
     const int kPrefColW = 150;
 
     // 设置 → 系统 → 屏幕 → 显示卡 页面（Windows 10 对应“显示 → 图形设置”）
@@ -60,9 +60,6 @@ namespace
     {
         HWND hMain    = nullptr;
         HWND hList    = nullptr;
-        HWND hRefresh = nullptr;
-        HWND hClean   = nullptr;
-        HWND hSettings = nullptr;
         HFONT hFont   = nullptr;
         std::vector<RegistryUtil::GpuEntry> entries;
         std::set<int> redItems;   // 需标红的行索引（清理确认期间）
@@ -217,19 +214,12 @@ namespace
             ApplyContextCommand(state, commandId);
     }
 
-    // 依据客户区尺寸布局：ListView 跟随上下左右，刷新按钮固定左上角
+    // 依据客户区尺寸布局：ListView 填满整个客户区
     void LayoutControls(UIState* state, int clientW, int clientH)
     {
-        MoveWindow(state->hRefresh, kMargin, kMargin, kButtonW, kButtonH, TRUE);
-        MoveWindow(state->hClean, kMargin + kButtonW + kButtonGap, kMargin,
-                   kCleanBtnW, kButtonH, TRUE);
-        MoveWindow(state->hSettings,
-                   kMargin + kButtonW + kButtonGap + kCleanBtnW + kButtonGap, kMargin,
-                   kSettingsBtnW, kButtonH, TRUE);
-
-        int listTop   = kMargin * 2 + kButtonH;
+        int listTop   = kMargin;
         int listWidth = clientW - kMargin * 2;
-        int listHeight = clientH - listTop - kMargin;
+        int listHeight = clientH - kMargin * 2;
         if (listWidth < 0)  listWidth = 0;
         if (listHeight < 0) listHeight = 0;
 
@@ -397,6 +387,59 @@ namespace
         }
     }
 
+    // 调用 GpuSelect.dll 导出的 DllRegisterServer / DllUnregisterServer，
+    // 安装或卸载资源管理器中的“绑定显卡”右键菜单
+    void RunDllRegistration(UIState* state, bool install)
+    {
+        wchar_t exePath[MAX_PATH] = {};
+        if (!::GetModuleFileNameW(nullptr, exePath, MAX_PATH))
+        {
+            MessageBoxW(state->hMain, L"无法定位程序目录。", kWindowTitle, MB_OK | MB_ICONERROR);
+            return;
+        }
+        ::PathRemoveFileSpecW(exePath);
+        const std::wstring dllPath = std::wstring(exePath) + L"\\GpuSelect.dll";
+
+        HMODULE hDll = ::LoadLibraryW(dllPath.c_str());
+        if (!hDll)
+        {
+            const std::wstring message = L"无法加载 " + dllPath +
+                L"。\n请确认 GpuSelect.dll 与本程序位于同一目录。";
+            MessageBoxW(state->hMain, message.c_str(), kWindowTitle, MB_OK | MB_ICONERROR);
+            return;
+        }
+
+        using RegisterFn = HRESULT(WINAPI*)();
+        RegisterFn registerFn = reinterpret_cast<RegisterFn>(
+            ::GetProcAddress(hDll, install ? "DllRegisterServer" : "DllUnregisterServer"));
+        if (!registerFn)
+        {
+            ::FreeLibrary(hDll);
+            MessageBoxW(state->hMain, L"GpuSelect.dll 未导出注册接口。",
+                        kWindowTitle, MB_OK | MB_ICONERROR);
+            return;
+        }
+
+        const HRESULT hr = registerFn();
+        ::FreeLibrary(hDll);
+
+        if (SUCCEEDED(hr))
+        {
+            MessageBoxW(state->hMain,
+                        install ? L"安装成功：已在资源管理器右键菜单中添加“绑定显卡”。"
+                                : L"卸载成功：已移除资源管理器右键菜单中的“绑定显卡”。",
+                        kWindowTitle, MB_OK | MB_ICONINFORMATION);
+        }
+        else
+        {
+            wchar_t code[32] = {};
+            swprintf_s(code, L"0x%08X", static_cast<unsigned int>(hr));
+            const std::wstring message = std::wstring(install ? L"安装失败，HRESULT = " : L"卸载失败，HRESULT = ") +
+                code + L"。";
+            MessageBoxW(state->hMain, message.c_str(), kWindowTitle, MB_OK | MB_ICONERROR);
+        }
+    }
+
     // 判断是否为文件系统路径（含反斜杠）。UWP 等以 AppUserModelID 形式存在的键
     // （如 "OpenAI.Codex_xxx!App"）不是文件路径，无法用文件存在性判断，故跳过。
     bool IsFileSystemPath(const std::wstring& path)
@@ -432,7 +475,7 @@ namespace
         std::wstring prompt = L"发现 " + std::to_wstring(state->redItems.size()) +
             L" 个文件已不存在的无效项（已在列表中标红）。\n\n确定要删除标红的项吗？";
         int answer = MessageBoxW(state->hMain, prompt.c_str(),
-                                 L"清理无效项", MB_YESNO | MB_ICONQUESTION);
+                                 L"清理", MB_YESNO | MB_ICONQUESTION);
 
         if (answer != IDYES)
         {
@@ -496,26 +539,18 @@ namespace
 
             HINSTANCE hInst = reinterpret_cast<LPCREATESTRUCT>(lParam)->hInstance;
 
-            // 刷新按钮（固定左上角）
-            s->hRefresh = CreateWindowExW(
-                0, L"BUTTON", L"刷新",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_REFRESH_BTN)),
-                hInst, nullptr);
+            // 菜单栏：“刷新”“清理”“系统设置”为第一级菜单，“右键”下拉包含安装/卸载
+            HMENU hMenuBar = CreateMenu();
+            AppendMenuW(hMenuBar, MF_STRING, IDM_REFRESH, L"刷新");
+            AppendMenuW(hMenuBar, MF_STRING, IDM_CLEAN, L"清理");
+            AppendMenuW(hMenuBar, MF_STRING, IDM_SETTINGS, L"系统设置");
 
-            // 清理无效项按钮（位于刷新按钮右侧，同样固定不随窗口缩放）
-            s->hClean = CreateWindowExW(
-                0, L"BUTTON", L"清理无效项",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_CLEAN_BTN)),
-                hInst, nullptr);
+            HMENU hExtMenu = CreatePopupMenu();
+            AppendMenuW(hExtMenu, MF_STRING, IDM_INSTALL, L"安装");
+            AppendMenuW(hExtMenu, MF_STRING, IDM_UNINSTALL, L"卸载");
+            AppendMenuW(hMenuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(hExtMenu), L"右键");
 
-            // 打开设置按钮（位于清理无效项按钮右侧）
-            s->hSettings = CreateWindowExW(
-                0, L"BUTTON", L"打开设置",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_SETTINGS_BTN)),
-                hInst, nullptr);
+            SetMenu(hWnd, hMenuBar);
 
             // ListView：不带 LVS_SINGLE_SEL 以支持多选；
             // LVS_SHOWSELALWAYS 保证拖放后（控件可能未获得焦点）选中行仍可见
@@ -525,9 +560,6 @@ namespace
                 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_LISTVIEW)),
                 hInst, nullptr);
 
-            SendMessageW(s->hRefresh, WM_SETFONT, reinterpret_cast<WPARAM>(s->hFont), TRUE);
-            SendMessageW(s->hClean, WM_SETFONT, reinterpret_cast<WPARAM>(s->hFont), TRUE);
-            SendMessageW(s->hSettings, WM_SETFONT, reinterpret_cast<WPARAM>(s->hFont), TRUE);
             SendMessageW(s->hList, WM_SETFONT, reinterpret_cast<WPARAM>(s->hFont), TRUE);
 
             ListView_SetExtendedListViewStyle(s->hList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
@@ -568,18 +600,24 @@ namespace
         }
 
         case WM_COMMAND:
-            if (state && HIWORD(wParam) == BN_CLICKED)
+            if (state)
             {
                 switch (LOWORD(wParam))
                 {
-                case IDC_REFRESH_BTN:
+                case IDM_REFRESH:
                     RefreshList(state);
                     return 0;
-                case IDC_CLEAN_BTN:
+                case IDM_CLEAN:
                     CleanInvalidEntries(state);
                     return 0;
-                case IDC_SETTINGS_BTN:
+                case IDM_SETTINGS:
                     OpenGraphicsSettings(state);
+                    return 0;
+                case IDM_INSTALL:
+                    RunDllRegistration(state, true);
+                    return 0;
+                case IDM_UNINSTALL:
+                    RunDllRegistration(state, false);
                     return 0;
                 }
             }
