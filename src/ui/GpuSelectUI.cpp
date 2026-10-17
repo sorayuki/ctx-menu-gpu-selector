@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
+#include <shellapi.h>
 #include <shlwapi.h>
 #include <algorithm>
 #include <cwchar>
@@ -28,6 +29,9 @@ namespace
     const int IDC_REFRESH_BTN = 1000;
     const int IDC_LISTVIEW    = 1001;
     const int IDC_CLEAN_BTN   = 1002;
+
+    // ListView 子类化 ID（用于接收拖放）
+    const UINT_PTR kListSubclassId = 1;
 
     // 右键菜单命令 ID（DEFAULT..HIGHPERF 必须连续，供 CheckMenuRadioItem 使用）
     const int IDM_CTX_CLEAR      = 2000;
@@ -231,8 +235,39 @@ namespace
         ListView_SetColumnWidth(state->hList, COL_PREF, kPrefColW);
     }
 
+    // 将 ListView 顶层项恢复到指定索引，从而还原刷新前的滚动条位置。
+    // 索引超出范围时（如清理后条目变少）夹取到有效范围内。
+    void RestoreListTopIndex(HWND hList, int savedTop)
+    {
+        int count = ListView_GetItemCount(hList);
+        if (count <= 0)
+            return;
+
+        if (savedTop < 0)
+            savedTop = 0;
+        if (savedTop >= count)
+            savedTop = count - 1;
+
+        // 表头占据客户区顶部，计算目标项相对表头底部的偏移后滚动
+        int headerHeight = 0;
+        HWND hHeader = ListView_GetHeader(hList);
+        RECT rcHeader = {};
+        if (hHeader && GetClientRect(hHeader, &rcHeader))
+            headerHeight = rcHeader.bottom - rcHeader.top;
+
+        RECT rcItem = {};
+        if (ListView_GetItemRect(hList, savedTop, &rcItem, LVIR_BOUNDS))
+        {
+            int delta = rcItem.top - headerHeight;
+            if (delta != 0)
+                ListView_Scroll(hList, 0, delta);
+        }
+    }
+
     void RefreshList(UIState* state)
     {
+        const int savedTop = ListView_GetTopIndex(state->hList);
+
         state->redItems.clear();
         state->entries = RegistryUtil::EnumerateAll();
         std::sort(state->entries.begin(), state->entries.end(),
@@ -255,6 +290,87 @@ namespace
             const wchar_t* label = RegistryUtil::PreferenceLabel(state->entries[i].preference);
             ListView_SetItemText(state->hList, i, COL_PREF, const_cast<LPWSTR>(label));
         }
+
+        RestoreListTopIndex(state->hList, savedTop);
+    }
+
+    // 刷新后选中与指定路径匹配的条目（用于拖放后的选中反馈）
+    void SelectEntriesByPath(UIState* state, const std::vector<std::wstring>& paths)
+    {
+        std::vector<int> matches;
+        for (int i = 0; i < static_cast<int>(state->entries.size()); ++i)
+        {
+            for (const auto& path : paths)
+            {
+                if (_wcsicmp(state->entries[i].exePath.c_str(), path.c_str()) == 0)
+                {
+                    matches.push_back(i);
+                    break;
+                }
+            }
+        }
+
+        if (matches.empty())
+            return;
+
+        ListView_SetItemState(state->hList, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+        for (int index : matches)
+            ListView_SetItemState(state->hList, index, LVIS_SELECTED, LVIS_SELECTED);
+        ListView_SetItemState(state->hList, matches.front(), LVIS_FOCUSED, LVIS_FOCUSED);
+    }
+
+    // 处理拖放到 ListView 的文件：仅接受 .exe 文件，将其亲和性设为“默认”后刷新列表
+    void HandleDroppedFiles(UIState* state, HDROP drop)
+    {
+        std::vector<std::wstring> exePaths;
+
+        UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+        for (UINT i = 0; i < count; ++i)
+        {
+            UINT len = DragQueryFileW(drop, i, nullptr, 0);
+            if (len == 0)
+                continue;
+
+            std::wstring path(len + 1, L'\0');
+            UINT copied = DragQueryFileW(drop, i, path.data(), len + 1);
+            if (copied == 0)
+                continue;
+            path.resize(copied);
+
+            const wchar_t* ext = PathFindExtensionW(path.c_str());
+            if (ext && _wcsicmp(ext, L".exe") == 0)
+                exePaths.push_back(std::move(path));
+        }
+
+        DragFinish(drop);
+
+        if (exePaths.empty())
+            return;
+
+        for (const auto& path : exePaths)
+            RegistryUtil::SetPreference(path, RegistryUtil::GpuDefault);
+
+        RefreshList(state);
+        SelectEntriesByPath(state, exePaths);
+    }
+
+    // ListView 子类化：拦截 WM_DROPFILES 以支持作为拖放目标
+    LRESULT CALLBACK ListViewSubclassProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                          UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
+    {
+        switch (msg)
+        {
+        case WM_DROPFILES:
+            HandleDroppedFiles(reinterpret_cast<UIState*>(dwRefData),
+                               reinterpret_cast<HDROP>(wParam));
+            return 0;
+
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(hWnd, ListViewSubclassProc, uIdSubclass);
+            break;
+        }
+
+        return DefSubclassProc(hWnd, msg, wParam, lParam);
     }
 
     // 判断是否为文件系统路径（含反斜杠）。UWP 等以 AppUserModelID 形式存在的键
@@ -370,10 +486,11 @@ namespace
                 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_CLEAN_BTN)),
                 hInst, nullptr);
 
-            // ListView：不带 LVS_SINGLE_SEL 以支持多选
+            // ListView：不带 LVS_SINGLE_SEL 以支持多选；
+            // LVS_SHOWSELALWAYS 保证拖放后（控件可能未获得焦点）选中行仍可见
             s->hList = CreateWindowExW(
                 WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-                WS_CHILD | WS_VISIBLE | LVS_REPORT,
+                WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS,
                 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_LISTVIEW)),
                 hInst, nullptr);
 
@@ -382,6 +499,11 @@ namespace
             SendMessageW(s->hList, WM_SETFONT, reinterpret_cast<WPARAM>(s->hFont), TRUE);
 
             ListView_SetExtendedListViewStyle(s->hList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+
+            // 让 ListView 作为拖放目标接收 exe 文件
+            DragAcceptFiles(s->hList, TRUE);
+            SetWindowSubclass(s->hList, ListViewSubclassProc, kListSubclassId,
+                              reinterpret_cast<DWORD_PTR>(s));
 
             LVCOLUMNW col = {};
             col.mask  = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
@@ -449,6 +571,11 @@ namespace
         case WM_DESTROY:
             if (state)
             {
+                if (state->hList)
+                {
+                    DragAcceptFiles(state->hList, FALSE);
+                    RemoveWindowSubclass(state->hList, ListViewSubclassProc, kListSubclassId);
+                }
                 SetWindowLongPtrW(hWnd, GWLP_USERDATA, 0);
                 delete state;
             }

@@ -57,6 +57,7 @@ target_link_libraries(GpuSelectUI PRIVATE
     user32
     gdi32
     shlwapi
+    shell32
 )
 
 # ── 安装（可选） ──────────────────────────────────────────
