@@ -7,6 +7,10 @@
 [x] 对于手动或者自动刷新列表的行为，需要在刷新后恢复刷新前listview的滚动条的位置
 [x] listview支持作为drag&drop的目标，接收exe文件；在接收drop之后，将该exe的GPU亲和性设置为“默认”，然后刷新列表。
 [x] 对于刚drop进去的项，在刷新之后变为选中状态
+[ ] 将DLL和EXE中重复的代码函数，改为DLL导出给EXE使用（曾实现后按要求回退：EXE 仍与 DLL 各自静态链接 RegistryUtil 核心库）
+[x] 在“清理无效项”按钮右侧添加“打开设置”按钮，点击后打开“开始菜单——设置——系统——屏幕——显示卡”会显示的页面，最好能直接定位到“应用程序的自定义设置”那边
+    - 已实现：按钮调用 `ShellExecuteW` 打开 `ms-settings:display-advancedgraphics`。
+    - 未能实现后半句：微软的 ms-settings URI 表里与显示卡相关的只有 `display-advancedgraphics`（应用列表页）和 `display-advancedgraphics-default`（默认图形设置），没有带参数的形式，无法深链到某个应用的“自定义设置”页，只能让用户在列表里点进去。
 
 要求
 复用现有代码里关于注册表读取、操作的逻辑；如果现有代码不能满足要求，可以进行修改

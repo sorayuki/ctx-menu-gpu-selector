@@ -29,6 +29,7 @@ namespace
     const int IDC_REFRESH_BTN = 1000;
     const int IDC_LISTVIEW    = 1001;
     const int IDC_CLEAN_BTN   = 1002;
+    const int IDC_SETTINGS_BTN = 1003;
 
     // ListView 子类化 ID（用于接收拖放）
     const UINT_PTR kListSubclassId = 1;
@@ -48,8 +49,12 @@ namespace
     const int kButtonW  = 88;
     const int kButtonH  = 28;
     const int kCleanBtnW = 110;
+    const int kSettingsBtnW = 88;
     const int kButtonGap = 8;
     const int kPrefColW = 150;
+
+    // 设置 → 系统 → 屏幕 → 显示卡 页面（Windows 10 对应“显示 → 图形设置”）
+    const wchar_t* const kGraphicsSettingsUri = L"ms-settings:display-advancedgraphics";
 
     struct UIState
     {
@@ -57,6 +62,7 @@ namespace
         HWND hList    = nullptr;
         HWND hRefresh = nullptr;
         HWND hClean   = nullptr;
+        HWND hSettings = nullptr;
         HFONT hFont   = nullptr;
         std::vector<RegistryUtil::GpuEntry> entries;
         std::set<int> redItems;   // 需标红的行索引（清理确认期间）
@@ -217,6 +223,9 @@ namespace
         MoveWindow(state->hRefresh, kMargin, kMargin, kButtonW, kButtonH, TRUE);
         MoveWindow(state->hClean, kMargin + kButtonW + kButtonGap, kMargin,
                    kCleanBtnW, kButtonH, TRUE);
+        MoveWindow(state->hSettings,
+                   kMargin + kButtonW + kButtonGap + kCleanBtnW + kButtonGap, kMargin,
+                   kSettingsBtnW, kButtonH, TRUE);
 
         int listTop   = kMargin * 2 + kButtonH;
         int listWidth = clientW - kMargin * 2;
@@ -373,6 +382,21 @@ namespace
         return DefSubclassProc(hWnd, msg, wParam, lParam);
     }
 
+    // 打开 Windows 的“显示卡”（图形）设置页面，交给用户在系统界面里继续操作
+    void OpenGraphicsSettings(UIState* state)
+    {
+        const INT_PTR result = reinterpret_cast<INT_PTR>(::ShellExecuteW(
+            state->hMain, L"open", kGraphicsSettingsUri, nullptr, nullptr, SW_SHOWNORMAL));
+
+        if (result <= 32)
+        {
+            const std::wstring message = std::wstring(
+                L"无法打开显示卡设置页面（") + kGraphicsSettingsUri +
+                L"）。\n请手动进入 设置 → 系统 → 屏幕 → 显示卡。";
+            MessageBoxW(state->hMain, message.c_str(), kWindowTitle, MB_OK | MB_ICONWARNING);
+        }
+    }
+
     // 判断是否为文件系统路径（含反斜杠）。UWP 等以 AppUserModelID 形式存在的键
     // （如 "OpenAI.Codex_xxx!App"）不是文件路径，无法用文件存在性判断，故跳过。
     bool IsFileSystemPath(const std::wstring& path)
@@ -486,6 +510,13 @@ namespace
                 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_CLEAN_BTN)),
                 hInst, nullptr);
 
+            // 打开设置按钮（位于清理无效项按钮右侧）
+            s->hSettings = CreateWindowExW(
+                0, L"BUTTON", L"打开设置",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_SETTINGS_BTN)),
+                hInst, nullptr);
+
             // ListView：不带 LVS_SINGLE_SEL 以支持多选；
             // LVS_SHOWSELALWAYS 保证拖放后（控件可能未获得焦点）选中行仍可见
             s->hList = CreateWindowExW(
@@ -496,6 +527,7 @@ namespace
 
             SendMessageW(s->hRefresh, WM_SETFONT, reinterpret_cast<WPARAM>(s->hFont), TRUE);
             SendMessageW(s->hClean, WM_SETFONT, reinterpret_cast<WPARAM>(s->hFont), TRUE);
+            SendMessageW(s->hSettings, WM_SETFONT, reinterpret_cast<WPARAM>(s->hFont), TRUE);
             SendMessageW(s->hList, WM_SETFONT, reinterpret_cast<WPARAM>(s->hFont), TRUE);
 
             ListView_SetExtendedListViewStyle(s->hList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
@@ -545,6 +577,9 @@ namespace
                     return 0;
                 case IDC_CLEAN_BTN:
                     CleanInvalidEntries(state);
+                    return 0;
+                case IDC_SETTINGS_BTN:
+                    OpenGraphicsSettings(state);
                     return 0;
                 }
             }
